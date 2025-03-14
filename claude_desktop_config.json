@@ -1,19 +1,16 @@
 {
-    "mcpServers": {
-        "filesystem": {
-            "command": "/Users/takeshiiijima/.bun/bin/bun",
-            "args": [
-                "run",
-                "/Users/takeshiiijima/github/claude-desktop-mcp/filesystem.ts",
-                "<user git path>"
-            ]
-        },
-        "shell": {
-            "command": "/Users/takeshiiijima/.bun/bin/bun",
-            "args": [
-                "run",
-                "/Users/takeshiiijima/github/claude-desktop-mcp/src/shell.ts"
-            ]
-        }
+  "mcpServers": {
+    "filesystem": {
+      "command": "/Users/takeshiiijima/.bun/bin/bun",
+      "args": [
+        "run",
+        "/Users/takeshiiijima/github/claude-desktop-mcp/src/filesystem.ts",
+        "/Users/takeshiiijima/github/github-trend-rss"
+      ]
+    },
+    "shell": {
+      "command": "/Users/takeshiiijima/.bun/bin/bun",
+      "args": ["run", "/Users/takeshiiijima/github/claude-desktop-mcp/src/shell.ts"]
     }
+  }
 }

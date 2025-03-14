@@ -1,297 +1,674 @@
-/**
- * ファイルシステム操作を可能にするModel Context Protocol(MCP)サーバー
- * このサーバーは、Claude Desktopからローカルファイルシステムへのアクセスを提供します
- */
+#!/usr/bin/env node
 
-// 必要なパッケージのインポート
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'; // MCPサーバーのコアクラス
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'; // 標準入出力を使用した通信
-import { z } from 'zod'; // バリデーション用ライブラリ
-import * as fs from 'fs'; // ファイルシステム操作
-import * as path from 'path'; // パス操作ユーティリティ
-import * as diffLib from 'diff'; // テキスト差分生成
-import * as minimatch from 'minimatch'; // ファイルパターンマッチング
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  ToolSchema,
+} from '@modelcontextprotocol/sdk/types.js';
+import fs from 'fs/promises';
+import path from 'path';
+import os from 'os';
+import { z } from 'zod';
+import { zodToJsonSchema } from 'zod-to-json-schema';
+import { createTwoFilesPatch } from 'diff';
+import { minimatch } from 'minimatch';
 
-// コマンドライン引数からベースディレクトリを取得（未指定の場合は現在のディレクトリを使用）
-const baseDir = process.argv[2] || process.cwd();
-console.error(`Base directory: ${baseDir}`); // デバッグ情報として出力
-
-// MCPサーバーインスタンスの作成
-// StdioServerTransportを使用して、標準入出力経由でClaudeと通信
-const server = new McpServer(new StdioServerTransport());
-
-/**
- * ファイルパスを正規化し、安全性をチェックする関数
- * @param filePath ユーザー指定のファイルパス
- * @returns 正規化されたフルパス
- * @throws ベースディレクトリ外へのアクセス試行時にエラーをスロー
- */
-function normalizePath(filePath: string): string {
-  // パスの結合と正規化（相対パスを絶対パスに変換など）
-  const normalizedPath = path.normalize(path.resolve(baseDir, filePath));
-
-  // ベースディレクトリの範囲外へのアクセスを防止（パストラバーサル攻撃対策）
-  if (!normalizedPath.startsWith(baseDir)) {
-    throw new Error(`Access denied: ${filePath} is outside the base directory`);
-  }
-
-  return normalizedPath;
+// Command line argument parsing
+const args = process.argv.slice(2);
+if (args.length === 0) {
+  console.error('Usage: mcp-server-filesystem <allowed-directory> [additional-directories...]');
+  process.exit(1);
 }
 
-// ツール1: ファイル一覧の取得
-// glob パターンに一致するファイルを検索し、リストとして返す
-server.tool(
-  'list_files', // ツール名
-  'Lists files matching the given glob pattern within the base directory', // ツールの説明
-  'Use this to find files in the filesystem that match specific patterns. Useful for locating source code files, configurations, or data files.', // 使用方法のガイド
-  {
-    // 入力パラメータの定義とバリデーション
-    parameters: z.object({
-      pattern: z
-        .string()
-        .describe("Glob pattern to match files (e.g., '**/*.ts' for all TypeScript files)"),
-      directory: z.string().optional().describe('Optional subdirectory to search within'),
-    }),
-    // 戻り値の型定義
-    returns: z.string().describe('List of matching files'),
-  },
-  // 実際の処理を行う非同期関数
-  async ({ pattern, directory = '.' }) => {
+// Normalize all paths consistently
+function normalizePath(p: string): string {
+  return path.normalize(p);
+}
+
+function expandHome(filepath: string): string {
+  if (filepath.startsWith('~/') || filepath === '~') {
+    return path.join(os.homedir(), filepath.slice(1));
+  }
+  return filepath;
+}
+
+// Store allowed directories in normalized form
+const allowedDirectories = args.map((dir) => normalizePath(path.resolve(expandHome(dir))));
+
+// Validate that all directories exist and are accessible
+await Promise.all(
+  args.map(async (dir) => {
     try {
-      // 検索ディレクトリのパスを正規化
-      const searchDir = normalizePath(directory);
-
-      // 指定されたディレクトリが存在し、ディレクトリであることを確認
-      if (!fs.existsSync(searchDir) || !fs.statSync(searchDir).isDirectory()) {
-        return `Error: Directory '${directory}' does not exist or is not a directory`;
+      const stats = await fs.stat(dir);
+      if (!stats.isDirectory()) {
+        console.error(`Error: ${dir} is not a directory`);
+        process.exit(1);
       }
+    } catch (error) {
+      console.error(`Error accessing directory ${dir}:`, error);
+      process.exit(1);
+    }
+  })
+);
 
-      /**
-       * ディレクトリ内のすべてのファイルを再帰的に取得する関数
-       * @param dir 検索するディレクトリ
-       * @param filesList 結果を蓄積する配列
-       * @returns 見つかったファイルパスの配列
-       */
-      const getAllFiles = (dir: string, filesList: string[] = []): string[] => {
-        // ディレクトリ内のファイルとサブディレクトリを列挙
-        const files = fs.readdirSync(dir);
+// Security utilities
+async function validatePath(requestedPath: string): Promise<string> {
+  const expandedPath = expandHome(requestedPath);
+  const absolute = path.isAbsolute(expandedPath)
+    ? path.resolve(expandedPath)
+    : path.resolve(process.cwd(), expandedPath);
 
-        // 各ファイル/ディレクトリに対する処理
-        files.forEach((file) => {
-          const filePath = path.join(dir, file);
-          const stat = fs.statSync(filePath);
+  const normalizedRequested = normalizePath(absolute);
 
-          if (stat.isDirectory()) {
-            // ディレクトリの場合は再帰的に処理
-            getAllFiles(filePath, filesList);
-          } else {
-            // ファイルの場合はリストに追加（ベースディレクトリからの相対パスに変換）
-            const relativePath = path.relative(baseDir, filePath);
-            filesList.push(relativePath);
-          }
+  // Check if path is within allowed directories
+  const isAllowed = allowedDirectories.some((dir) => normalizedRequested.startsWith(dir));
+  if (!isAllowed) {
+    throw new Error(
+      `Access denied - path outside allowed directories: ${absolute} not in ${allowedDirectories.join(
+        ', '
+      )}`
+    );
+  }
+
+  // Handle symlinks by checking their real path
+  try {
+    const realPath = await fs.realpath(absolute);
+    const normalizedReal = normalizePath(realPath);
+    const isRealPathAllowed = allowedDirectories.some((dir) => normalizedReal.startsWith(dir));
+    if (!isRealPathAllowed) {
+      throw new Error('Access denied - symlink target outside allowed directories');
+    }
+    return realPath;
+  } catch (error) {
+    // For new files that don't exist yet, verify parent directory
+    const parentDir = path.dirname(absolute);
+    try {
+      const realParentPath = await fs.realpath(parentDir);
+      const normalizedParent = normalizePath(realParentPath);
+      const isParentAllowed = allowedDirectories.some((dir) => normalizedParent.startsWith(dir));
+      if (!isParentAllowed) {
+        throw new Error('Access denied - parent directory outside allowed directories');
+      }
+      return absolute;
+    } catch {
+      throw new Error(`Parent directory does not exist: ${parentDir}`);
+    }
+  }
+}
+
+// Schema definitions
+const ReadFileArgsSchema = z.object({
+  path: z.string(),
+});
+
+const ReadMultipleFilesArgsSchema = z.object({
+  paths: z.array(z.string()),
+});
+
+const WriteFileArgsSchema = z.object({
+  path: z.string(),
+  content: z.string(),
+});
+
+const EditOperation = z.object({
+  oldText: z.string().describe('Text to search for - must match exactly'),
+  newText: z.string().describe('Text to replace with'),
+});
+
+const EditFileArgsSchema = z.object({
+  path: z.string(),
+  edits: z.array(EditOperation),
+  dryRun: z.boolean().default(false).describe('Preview changes using git-style diff format'),
+});
+
+const CreateDirectoryArgsSchema = z.object({
+  path: z.string(),
+});
+
+const ListDirectoryArgsSchema = z.object({
+  path: z.string(),
+});
+
+const DirectoryTreeArgsSchema = z.object({
+  path: z.string(),
+});
+
+const MoveFileArgsSchema = z.object({
+  source: z.string(),
+  destination: z.string(),
+});
+
+const SearchFilesArgsSchema = z.object({
+  path: z.string(),
+  pattern: z.string(),
+  excludePatterns: z.array(z.string()).optional().default([]),
+});
+
+const GetFileInfoArgsSchema = z.object({
+  path: z.string(),
+});
+
+const ToolInputSchema = ToolSchema.shape.inputSchema;
+type ToolInput = z.infer<typeof ToolInputSchema>;
+
+interface FileInfo {
+  size: number;
+  created: Date;
+  modified: Date;
+  accessed: Date;
+  isDirectory: boolean;
+  isFile: boolean;
+  permissions: string;
+}
+
+// Server setup
+const server = new Server(
+  {
+    name: 'secure-filesystem-server',
+    version: '0.2.0',
+  },
+  {
+    capabilities: {
+      tools: {},
+    },
+  }
+);
+
+// Tool implementations
+async function getFileStats(filePath: string): Promise<FileInfo> {
+  const stats = await fs.stat(filePath);
+  return {
+    size: stats.size,
+    created: stats.birthtime,
+    modified: stats.mtime,
+    accessed: stats.atime,
+    isDirectory: stats.isDirectory(),
+    isFile: stats.isFile(),
+    permissions: stats.mode.toString(8).slice(-3),
+  };
+}
+
+async function searchFiles(
+  rootPath: string,
+  pattern: string,
+  excludePatterns: string[] = []
+): Promise<string[]> {
+  const results: string[] = [];
+
+  async function search(currentPath: string) {
+    const entries = await fs.readdir(currentPath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const fullPath = path.join(currentPath, entry.name);
+
+      try {
+        // Validate each path before processing
+        await validatePath(fullPath);
+
+        // Check if path matches any exclude pattern
+        const relativePath = path.relative(rootPath, fullPath);
+        const shouldExclude = excludePatterns.some((pattern) => {
+          const globPattern = pattern.includes('*') ? pattern : `**/${pattern}/**`;
+          return minimatch(relativePath, globPattern, { dot: true });
         });
 
-        return filesList;
-      };
+        if (shouldExclude) {
+          continue;
+        }
 
-      // すべてのファイルを取得してパターンマッチング
-      const allFiles = getAllFiles(searchDir);
-      const matchingFiles = allFiles.filter((file) => minimatch.default(file, pattern));
+        if (entry.name.toLowerCase().includes(pattern.toLowerCase())) {
+          results.push(fullPath);
+        }
 
-      // 結果の返却
-      if (matchingFiles.length === 0) {
-        return `No files matching pattern '${pattern}' found in '${directory}'`;
+        if (entry.isDirectory()) {
+          await search(fullPath);
+        }
+      } catch (error) {
+        // Skip invalid paths during search
+        continue;
       }
-
-      return matchingFiles.join('\n'); // 一致したファイルのリストを改行区切りで返す
-    } catch (error) {
-      // エラーハンドリングと適切なエラーメッセージの返却
-      if (error instanceof Error) {
-        return `Error listing files: ${error.message}`;
-      }
-      return 'An unknown error occurred while listing files';
     }
   }
-);
 
-// ツール2: ファイル読み込み
-// 指定されたファイルの内容を読み取って返す
-server.tool(
-  'read_file', // ツール名
-  'Reads the content of a file', // ツールの説明
-  'Use this to read the contents of files for analysis, understanding code, or retrieving data.', // 使用方法のガイド
-  {
-    // 入力パラメータの定義
-    parameters: z.object({
-      path: z.string().describe('Path to the file to read'),
-    }),
-    // 戻り値の型定義
-    returns: z.string().describe('Content of the file'),
-  },
-  // 実際の処理を行う非同期関数
-  async ({ path: filePath }) => {
-    try {
-      // ファイルパスの正規化
-      const normalizedPath = normalizePath(filePath);
+  await search(rootPath);
+  return results;
+}
 
-      // ファイルの存在確認
-      if (!fs.existsSync(normalizedPath)) {
-        return `Error: File '${filePath}' does not exist`;
+// file editing and diffing utilities
+function normalizeLineEndings(text: string): string {
+  return text.replace(/\r\n/g, '\n');
+}
+
+function createUnifiedDiff(
+  originalContent: string,
+  newContent: string,
+  filepath: string = 'file'
+): string {
+  // Ensure consistent line endings for diff
+  const normalizedOriginal = normalizeLineEndings(originalContent);
+  const normalizedNew = normalizeLineEndings(newContent);
+
+  return createTwoFilesPatch(
+    filepath,
+    filepath,
+    normalizedOriginal,
+    normalizedNew,
+    'original',
+    'modified'
+  );
+}
+
+async function applyFileEdits(
+  filePath: string,
+  edits: Array<{ oldText: string; newText: string }>,
+  dryRun = false
+): Promise<string> {
+  // Read file content and normalize line endings
+  const content = normalizeLineEndings(await fs.readFile(filePath, 'utf-8'));
+
+  // Apply edits sequentially
+  let modifiedContent = content;
+  for (const edit of edits) {
+    const normalizedOld = normalizeLineEndings(edit.oldText);
+    const normalizedNew = normalizeLineEndings(edit.newText);
+
+    // If exact match exists, use it
+    if (modifiedContent.includes(normalizedOld)) {
+      modifiedContent = modifiedContent.replace(normalizedOld, normalizedNew);
+      continue;
+    }
+
+    // Otherwise, try line-by-line matching with flexibility for whitespace
+    const oldLines = normalizedOld.split('\n');
+    const contentLines = modifiedContent.split('\n');
+    let matchFound = false;
+
+    for (let i = 0; i <= contentLines.length - oldLines.length; i++) {
+      const potentialMatch = contentLines.slice(i, i + oldLines.length);
+
+      // Compare lines with normalized whitespace
+      const isMatch = oldLines.every((oldLine, j) => {
+        const contentLine = potentialMatch[j];
+        return oldLine.trim() === contentLine.trim();
+      });
+
+      if (isMatch) {
+        // Preserve original indentation of first line
+        const originalIndent = contentLines[i].match(/^\s*/)?.[0] || '';
+        const newLines = normalizedNew.split('\n').map((line, j) => {
+          if (j === 0) return originalIndent + line.trimStart();
+          // For subsequent lines, try to preserve relative indentation
+          const oldIndent = oldLines[j]?.match(/^\s*/)?.[0] || '';
+          const newIndent = line.match(/^\s*/)?.[0] || '';
+          if (oldIndent && newIndent) {
+            const relativeIndent = newIndent.length - oldIndent.length;
+            return originalIndent + ' '.repeat(Math.max(0, relativeIndent)) + line.trimStart();
+          }
+          return line;
+        });
+
+        contentLines.splice(i, oldLines.length, ...newLines);
+        modifiedContent = contentLines.join('\n');
+        matchFound = true;
+        break;
       }
+    }
 
-      // 指定されたパスがファイルであることを確認
-      if (!fs.statSync(normalizedPath).isFile()) {
-        return `Error: '${filePath}' is not a file`;
-      }
-
-      // ファイル内容の読み込みと返却
-      const content = fs.readFileSync(normalizedPath, 'utf8');
-      return content;
-    } catch (error) {
-      // エラーハンドリング
-      if (error instanceof Error) {
-        return `Error reading file: ${error.message}`;
-      }
-      return 'An unknown error occurred while reading the file';
+    if (!matchFound) {
+      throw new Error(`Could not find exact match for edit:\n${edit.oldText}`);
     }
   }
-);
 
-// ツール3: ファイル書き込み
-// 指定されたパスにコンテンツを書き込む（新規作成または上書き）
-server.tool(
-  'write_file', // ツール名
-  'Writes content to a file', // ツールの説明
-  'Use this to create new files or overwrite existing files. Useful for code generation or modifications.', // 使用方法のガイド
-  {
-    // 入力パラメータの定義
-    parameters: z.object({
-      path: z.string().describe('Path to the file to write'),
-      content: z.string().describe('Content to write to the file'),
-    }),
-    // 戻り値の型定義
-    returns: z.string().describe('Result of the operation'),
-  },
-  // 実際の処理を行う非同期関数
-  async ({ path: filePath, content }) => {
-    try {
-      // ファイルパスの正規化
-      const normalizedPath = normalizePath(filePath);
+  // Create unified diff
+  const diff = createUnifiedDiff(content, modifiedContent, filePath);
 
-      // 親ディレクトリが存在するか確認し、存在しなければ再帰的に作成
-      const directory = path.dirname(normalizedPath);
-      if (!fs.existsSync(directory)) {
-        fs.mkdirSync(directory, { recursive: true });
-      }
-
-      // ファイル内容の書き込み
-      fs.writeFileSync(normalizedPath, content, 'utf8');
-      return `File '${filePath}' has been written successfully`;
-    } catch (error) {
-      // エラーハンドリング
-      if (error instanceof Error) {
-        return `Error writing file: ${error.message}`;
-      }
-      return 'An unknown error occurred while writing the file';
-    }
+  // Format diff with appropriate number of backticks
+  let numBackticks = 3;
+  while (diff.includes('`'.repeat(numBackticks))) {
+    numBackticks++;
   }
-);
+  const formattedDiff = `${'`'.repeat(numBackticks)}diff\n${diff}${'`'.repeat(numBackticks)}\n\n`;
 
-// ツール4: ファイル編集（差分表示付き）
-// 既存ファイルを新しい内容で更新し、変更内容の差分を表示する
-server.tool(
-  'edit_file', // ツール名
-  'Edits an existing file with the provided content and shows diff', // ツールの説明
-  'Use this to modify existing files while seeing the changes. Great for code modifications, bug fixes, or refactoring.', // 使用方法のガイド
-  {
-    // 入力パラメータの定義
-    parameters: z.object({
-      path: z.string().describe('Path to the file to edit'),
-      content: z.string().describe('New content for the file'),
-    }),
-    // 戻り値の型定義
-    returns: z.string().describe('Diff of the changes and result of the operation'),
-  },
-  // 実際の処理を行う非同期関数
-  async ({ path: filePath, content: newContent }) => {
-    try {
-      // ファイルパスの正規化
-      const normalizedPath = normalizePath(filePath);
-
-      // ファイルの存在確認
-      if (!fs.existsSync(normalizedPath)) {
-        return `Error: File '${filePath}' does not exist`;
-      }
-
-      // 元の内容の読み込み
-      const oldContent = fs.readFileSync(normalizedPath, 'utf8');
-
-      // 差分の生成（unified diff形式）
-      // createPatchは「元のファイル名」「新しいファイル名」「元の内容」「新しい内容」「元のヘッダ」「新しいヘッダ」を受け取る
-      const diff = diffLib.createPatch(filePath, oldContent, newContent, 'Old', 'New');
-
-      // 新しい内容でファイルを上書き
-      fs.writeFileSync(normalizedPath, newContent, 'utf8');
-
-      // 結果と差分を返却
-      return `File '${filePath}' has been edited successfully.\n\nChanges:\n${diff}`;
-    } catch (error) {
-      // エラーハンドリング
-      if (error instanceof Error) {
-        return `Error editing file: ${error.message}`;
-      }
-      return 'An unknown error occurred while editing the file';
-    }
+  if (!dryRun) {
+    await fs.writeFile(filePath, modifiedContent, 'utf-8');
   }
-);
 
-// ツール5: ファイル削除
-// 指定されたファイルを削除する
-server.tool(
-  'delete_file', // ツール名
-  'Deletes a file', // ツールの説明
-  'Use this to remove files that are no longer needed.', // 使用方法のガイド
-  {
-    // 入力パラメータの定義
-    parameters: z.object({
-      path: z.string().describe('Path to the file to delete'),
-    }),
-    // 戻り値の型定義
-    returns: z.string().describe('Result of the operation'),
-  },
-  // 実際の処理を行う非同期関数
-  async ({ path: filePath }) => {
-    try {
-      // ファイルパスの正規化
-      const normalizedPath = normalizePath(filePath);
+  return formattedDiff;
+}
 
-      // ファイルの存在確認
-      if (!fs.existsSync(normalizedPath)) {
-        return `Error: File '${filePath}' does not exist`;
+// Tool handlers
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  return {
+    tools: [
+      {
+        name: 'read_file',
+        description:
+          'Read the complete contents of a file from the file system. ' +
+          'Handles various text encodings and provides detailed error messages ' +
+          'if the file cannot be read. Use this tool when you need to examine ' +
+          'the contents of a single file. Only works within allowed directories.',
+        inputSchema: zodToJsonSchema(ReadFileArgsSchema) as ToolInput,
+      },
+      {
+        name: 'read_multiple_files',
+        description:
+          'Read the contents of multiple files simultaneously. This is more ' +
+          'efficient than reading files one by one when you need to analyze ' +
+          "or compare multiple files. Each file's content is returned with its " +
+          "path as a reference. Failed reads for individual files won't stop " +
+          'the entire operation. Only works within allowed directories.',
+        inputSchema: zodToJsonSchema(ReadMultipleFilesArgsSchema) as ToolInput,
+      },
+      {
+        name: 'write_file',
+        description:
+          'Create a new file or completely overwrite an existing file with new content. ' +
+          'Use with caution as it will overwrite existing files without warning. ' +
+          'Handles text content with proper encoding. Only works within allowed directories.',
+        inputSchema: zodToJsonSchema(WriteFileArgsSchema) as ToolInput,
+      },
+      {
+        name: 'edit_file',
+        description:
+          'Make line-based edits to a text file. Each edit replaces exact line sequences ' +
+          'with new content. Returns a git-style diff showing the changes made. ' +
+          'Only works within allowed directories.',
+        inputSchema: zodToJsonSchema(EditFileArgsSchema) as ToolInput,
+      },
+      {
+        name: 'create_directory',
+        description:
+          'Create a new directory or ensure a directory exists. Can create multiple ' +
+          'nested directories in one operation. If the directory already exists, ' +
+          'this operation will succeed silently. Perfect for setting up directory ' +
+          'structures for projects or ensuring required paths exist. Only works within allowed directories.',
+        inputSchema: zodToJsonSchema(CreateDirectoryArgsSchema) as ToolInput,
+      },
+      {
+        name: 'list_directory',
+        description:
+          'Get a detailed listing of all files and directories in a specified path. ' +
+          'Results clearly distinguish between files and directories with [FILE] and [DIR] ' +
+          'prefixes. This tool is essential for understanding directory structure and ' +
+          'finding specific files within a directory. Only works within allowed directories.',
+        inputSchema: zodToJsonSchema(ListDirectoryArgsSchema) as ToolInput,
+      },
+      {
+        name: 'directory_tree',
+        description:
+          'Get a recursive tree view of files and directories as a JSON structure. ' +
+          "Each entry includes 'name', 'type' (file/directory), and 'children' for directories. " +
+          'Files have no children array, while directories always have a children array (which may be empty). ' +
+          'The output is formatted with 2-space indentation for readability. Only works within allowed directories.',
+        inputSchema: zodToJsonSchema(DirectoryTreeArgsSchema) as ToolInput,
+      },
+      {
+        name: 'move_file',
+        description:
+          'Move or rename files and directories. Can move files between directories ' +
+          'and rename them in a single operation. If the destination exists, the ' +
+          'operation will fail. Works across different directories and can be used ' +
+          'for simple renaming within the same directory. Both source and destination must be within allowed directories.',
+        inputSchema: zodToJsonSchema(MoveFileArgsSchema) as ToolInput,
+      },
+      {
+        name: 'search_files',
+        description:
+          'Recursively search for files and directories matching a pattern. ' +
+          'Searches through all subdirectories from the starting path. The search ' +
+          'is case-insensitive and matches partial names. Returns full paths to all ' +
+          "matching items. Great for finding files when you don't know their exact location. " +
+          'Only searches within allowed directories.',
+        inputSchema: zodToJsonSchema(SearchFilesArgsSchema) as ToolInput,
+      },
+      {
+        name: 'get_file_info',
+        description:
+          'Retrieve detailed metadata about a file or directory. Returns comprehensive ' +
+          'information including size, creation time, last modified time, permissions, ' +
+          'and type. This tool is perfect for understanding file characteristics ' +
+          'without reading the actual content. Only works within allowed directories.',
+        inputSchema: zodToJsonSchema(GetFileInfoArgsSchema) as ToolInput,
+      },
+      {
+        name: 'list_allowed_directories',
+        description:
+          'Returns the list of directories that this server is allowed to access. ' +
+          'Use this to understand which directories are available before trying to access files.',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+          required: [],
+        },
+      },
+    ],
+  };
+});
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  try {
+    const { name, arguments: args } = request.params;
+
+    switch (name) {
+      case 'read_file': {
+        const parsed = ReadFileArgsSchema.safeParse(args);
+        if (!parsed.success) {
+          throw new Error(`Invalid arguments for read_file: ${parsed.error}`);
+        }
+        const validPath = await validatePath(parsed.data.path);
+        const content = await fs.readFile(validPath, 'utf-8');
+        return {
+          content: [{ type: 'text', text: content }],
+        };
       }
 
-      // 指定されたパスがファイルであることを確認
-      if (!fs.statSync(normalizedPath).isFile()) {
-        return `Error: '${filePath}' is not a file`;
+      case 'read_multiple_files': {
+        const parsed = ReadMultipleFilesArgsSchema.safeParse(args);
+        if (!parsed.success) {
+          throw new Error(`Invalid arguments for read_multiple_files: ${parsed.error}`);
+        }
+        const results = await Promise.all(
+          parsed.data.paths.map(async (filePath: string) => {
+            try {
+              const validPath = await validatePath(filePath);
+              const content = await fs.readFile(validPath, 'utf-8');
+              return `${filePath}:\n${content}\n`;
+            } catch (error) {
+              const errorMessage = error instanceof Error ? error.message : String(error);
+              return `${filePath}: Error - ${errorMessage}`;
+            }
+          })
+        );
+        return {
+          content: [{ type: 'text', text: results.join('\n---\n') }],
+        };
       }
 
-      // ファイルの削除
-      fs.unlinkSync(normalizedPath);
-      return `File '${filePath}' has been deleted successfully`;
-    } catch (error) {
-      // エラーハンドリング
-      if (error instanceof Error) {
-        return `Error deleting file: ${error.message}`;
+      case 'write_file': {
+        const parsed = WriteFileArgsSchema.safeParse(args);
+        if (!parsed.success) {
+          throw new Error(`Invalid arguments for write_file: ${parsed.error}`);
+        }
+        const validPath = await validatePath(parsed.data.path);
+        await fs.writeFile(validPath, parsed.data.content, 'utf-8');
+        return {
+          content: [{ type: 'text', text: `Successfully wrote to ${parsed.data.path}` }],
+        };
       }
-      return 'An unknown error occurred while deleting the file';
+
+      case 'edit_file': {
+        const parsed = EditFileArgsSchema.safeParse(args);
+        if (!parsed.success) {
+          throw new Error(`Invalid arguments for edit_file: ${parsed.error}`);
+        }
+        const validPath = await validatePath(parsed.data.path);
+        const result = await applyFileEdits(validPath, parsed.data.edits, parsed.data.dryRun);
+        return {
+          content: [{ type: 'text', text: result }],
+        };
+      }
+
+      case 'create_directory': {
+        const parsed = CreateDirectoryArgsSchema.safeParse(args);
+        if (!parsed.success) {
+          throw new Error(`Invalid arguments for create_directory: ${parsed.error}`);
+        }
+        const validPath = await validatePath(parsed.data.path);
+        await fs.mkdir(validPath, { recursive: true });
+        return {
+          content: [{ type: 'text', text: `Successfully created directory ${parsed.data.path}` }],
+        };
+      }
+
+      case 'list_directory': {
+        const parsed = ListDirectoryArgsSchema.safeParse(args);
+        if (!parsed.success) {
+          throw new Error(`Invalid arguments for list_directory: ${parsed.error}`);
+        }
+        const validPath = await validatePath(parsed.data.path);
+        const entries = await fs.readdir(validPath, { withFileTypes: true });
+        const formatted = entries
+          .map((entry) => `${entry.isDirectory() ? '[DIR]' : '[FILE]'} ${entry.name}`)
+          .join('\n');
+        return {
+          content: [{ type: 'text', text: formatted }],
+        };
+      }
+
+      case 'directory_tree': {
+        const parsed = DirectoryTreeArgsSchema.safeParse(args);
+        if (!parsed.success) {
+          throw new Error(`Invalid arguments for directory_tree: ${parsed.error}`);
+        }
+
+        interface TreeEntry {
+          name: string;
+          type: 'file' | 'directory';
+          children?: TreeEntry[];
+        }
+
+        async function buildTree(currentPath: string): Promise<TreeEntry[]> {
+          const validPath = await validatePath(currentPath);
+          const entries = await fs.readdir(validPath, { withFileTypes: true });
+          const result: TreeEntry[] = [];
+
+          for (const entry of entries) {
+            const entryData: TreeEntry = {
+              name: entry.name,
+              type: entry.isDirectory() ? 'directory' : 'file',
+            };
+
+            if (entry.isDirectory()) {
+              const subPath = path.join(currentPath, entry.name);
+              entryData.children = await buildTree(subPath);
+            }
+
+            result.push(entryData);
+          }
+
+          return result;
+        }
+
+        const treeData = await buildTree(parsed.data.path);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(treeData, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'move_file': {
+        const parsed = MoveFileArgsSchema.safeParse(args);
+        if (!parsed.success) {
+          throw new Error(`Invalid arguments for move_file: ${parsed.error}`);
+        }
+        const validSourcePath = await validatePath(parsed.data.source);
+        const validDestPath = await validatePath(parsed.data.destination);
+        await fs.rename(validSourcePath, validDestPath);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Successfully moved ${parsed.data.source} to ${parsed.data.destination}`,
+            },
+          ],
+        };
+      }
+
+      case 'search_files': {
+        const parsed = SearchFilesArgsSchema.safeParse(args);
+        if (!parsed.success) {
+          throw new Error(`Invalid arguments for search_files: ${parsed.error}`);
+        }
+        const validPath = await validatePath(parsed.data.path);
+        const results = await searchFiles(
+          validPath,
+          parsed.data.pattern,
+          parsed.data.excludePatterns
+        );
+        return {
+          content: [
+            { type: 'text', text: results.length > 0 ? results.join('\n') : 'No matches found' },
+          ],
+        };
+      }
+
+      case 'get_file_info': {
+        const parsed = GetFileInfoArgsSchema.safeParse(args);
+        if (!parsed.success) {
+          throw new Error(`Invalid arguments for get_file_info: ${parsed.error}`);
+        }
+        const validPath = await validatePath(parsed.data.path);
+        const info = await getFileStats(validPath);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: Object.entries(info)
+                .map(([key, value]) => `${key}: ${value}`)
+                .join('\n'),
+            },
+          ],
+        };
+      }
+
+      case 'list_allowed_directories': {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Allowed directories:\n${allowedDirectories.join('\n')}`,
+            },
+          ],
+        };
+      }
+
+      default:
+        throw new Error(`Unknown tool: ${name}`);
     }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    return {
+      content: [{ type: 'text', text: `Error: ${errorMessage}` }],
+      isError: true,
+    };
   }
-);
+});
 
-// サーバーの起動
-// StdioServerTransport インスタンスを作成し、サーバーと接続
-// これにより、標準入出力を通じてClaudeとの通信が確立される
-const transport = new StdioServerTransport();
-server.connect(transport).catch((error) => {
-  console.error('Error starting MCP server:', error);
+// Start server
+async function runServer() {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error('Secure MCP Filesystem Server running on stdio');
+  console.error('Allowed directories:', allowedDirectories);
+}
+
+runServer().catch((error) => {
+  console.error('Fatal error running server:', error);
+  process.exit(1);
 });
