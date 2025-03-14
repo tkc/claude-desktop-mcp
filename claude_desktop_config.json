@@ -1,0 +1,19 @@
+{
+    "mcpServers": {
+        "filesystem": {
+            "command": "/Users/takeshiiijima/.bun/bin/bun",
+            "args": [
+                "run",
+                "/Users/takeshiiijima/github/claude-desktop-mcp/filesystem.ts",
+                "<user git path>"
+            ]
+        },
+        "shell": {
+            "command": "/Users/takeshiiijima/.bun/bin/bun",
+            "args": [
+                "run",
+                "/Users/takeshiiijima/github/claude-desktop-mcp/src/shell.ts"
+            ]
+        }
+    }
+}

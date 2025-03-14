@@ -1,0 +1,28 @@
+{
+  "name": "claude-desktop-mcp",
+  "module": "index.ts",
+  "type": "module",
+  "devDependencies": {
+    "@eslint/js": "^9.22.0",
+    "@types/bun": "latest",
+    "eslint": "^8.57.0",
+    "typescript-eslint": "^8.26.1"
+  },
+  "scripts": {
+    "lint": "eslint \"**/*.ts\"",
+    "lint:fix": "eslint \"**/*.ts\" --fix",
+    "format": "prettier --write \"**/*.{ts,js,json,md}\"",
+    "check": "bun run lint && tsc --noEmit"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.7.0",
+    "@types/diff": "^7.0.1",
+    "diff": "^7.0.0",
+    "minimatch": "^10.0.1",
+    "prettier": "3.5.3",
+    "zod": "^3.24.2"
+  }
+}
