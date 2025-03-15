@@ -10,7 +10,17 @@
     },
     "shell": {
       "command": "/Users/takeshiiijima/.bun/bin/bun",
-      "args": ["run", "/Users/takeshiiijima/github/claude-desktop-mcp/src/shell.ts"]
+      "args": [
+        "run",
+        "/Users/takeshiiijima/github/claude-desktop-mcp/src/shell.ts"
+      ]
+    },
+    "git": {
+      "command": "/Users/takeshiiijima/.bun/bin/bun",
+      "args": [
+        "run",
+        "/Users/takeshiiijima/github/claude-desktop-mcp/src/git.ts"
+      ]
     }
   }
 }
