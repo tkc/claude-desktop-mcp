@@ -153,7 +153,7 @@ class ShellExecutor {
       // 開発ツール
       'node',
       'python',
-      'python3',
+      'poetry',
       'tsc',
       'eslint',
       'prettier',
@@ -168,6 +168,7 @@ class ShellExecutor {
       'echo',
       'touch',
       'grep',
+      'bun',
     ]);
 
     // ベースディレクトリを設定

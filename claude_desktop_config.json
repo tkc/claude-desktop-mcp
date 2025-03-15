@@ -5,7 +5,7 @@
       "args": [
         "run",
         "/Users/takeshiiijima/github/claude-desktop-mcp/src/filesystem.ts",
-        "/Users/takeshiiijima/github/github-trend-rss"
+        "/Users/takeshiiijima/github/claude-desktop-mcp"
       ]
     },
     "shell": {
@@ -13,6 +13,13 @@
       "args": [
         "run",
         "/Users/takeshiiijima/github/claude-desktop-mcp/src/shell.ts"
+      ]
+    },
+    "garxiv": {
+      "command": "/Users/takeshiiijima/.bun/bin/bun",
+      "args": [
+        "run",
+        "/Users/takeshiiijima/github/claude-desktop-mcp/src/arxiv.ts"
       ]
     },
     "git": {
