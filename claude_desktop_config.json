@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "filesystem": {
-      "command": "/Users/takeshiiijima/.bun/bin/bun",
+      "command": "~/.bun/bin/bun",
       "args": [
         "run",
         "/Users/takeshiiijima/github/claude-desktop-mcp/src/filesystem.ts",
@@ -9,21 +9,21 @@
       ]
     },
     "shell": {
-      "command": "/Users/takeshiiijima/.bun/bin/bun",
+      "command": "~/.bun/bin/bun",
       "args": [
         "run",
         "/Users/takeshiiijima/github/claude-desktop-mcp/src/shell.ts"
       ]
     },
     "garxiv": {
-      "command": "/Users/takeshiiijima/.bun/bin/bun",
+      "command": "~/.bun/bin/bun",
       "args": [
         "run",
         "/Users/takeshiiijima/github/claude-desktop-mcp/src/arxiv.ts"
       ]
     },
     "git": {
-      "command": "/Users/takeshiiijima/.bun/bin/bun",
+      "command": "~/.bun/bin/bun",
       "args": [
         "run",
         "/Users/takeshiiijima/github/claude-desktop-mcp/src/git.ts"
