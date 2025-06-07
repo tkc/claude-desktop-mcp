@@ -1,33 +1,44 @@
 {
-  "mcpServers": {
-    "filesystem": {
-      "command": "~/.bun/bin/bun",
-      "args": [
-        "run",
-        "/Users/takeshiiijima/github/claude-desktop-mcp/src/filesystem.ts",
-        "/Users/takeshiiijima/github/claude-desktop-mcp"
-      ]
-    },
-    "shell": {
-      "command": "~/.bun/bin/bun",
-      "args": [
-        "run",
-        "/Users/takeshiiijima/github/claude-desktop-mcp/src/shell.ts"
-      ]
-    },
-    "garxiv": {
-      "command": "~/.bun/bin/bun",
-      "args": [
-        "run",
-        "/Users/takeshiiijima/github/claude-desktop-mcp/src/arxiv.ts"
-      ]
-    },
-    "git": {
-      "command": "~/.bun/bin/bun",
-      "args": [
-        "run",
-        "/Users/takeshiiijima/github/claude-desktop-mcp/src/git.ts"
-      ]
+    "mcpServers": {
+        "filesystem": {
+            "command": "/Users/takeshiiijima/.bun/bin/bun",
+            "args": [
+                "run",
+                "/Users/takeshiiijima/github/claude-desktop-mcp/src/filesystem.ts",
+                "/Users/takeshiiijima/github"
+            ]
+        },
+        "shell": {
+            "command": "/Users/takeshiiijima/.bun/bin/bun",
+            "args": [
+                "run",
+                "/Users/takeshiiijima/github/claude-desktop-mcp/src/shell.ts"
+            ]
+        },
+        "garxiv": {
+            "command": "/Users/takeshiiijima/.bun/bin/bun",
+            "args": [
+                "run",
+                "/Users/takeshiiijima/github/claude-desktop-mcp/src/arxiv.ts"
+            ]
+        },
+        "git": {
+            "command": "/Users/takeshiiijima/.bun/bin/bun",
+            "args": [
+                "run",
+                "/Users/takeshiiijima/github/claude-desktop-mcp/src/git.ts"
+            ]
+        },
+        "awslabs.terraform-mcp-server": {
+            "command": "/Users/takeshiiijima/.local/bin/uvx",
+            "args": [
+                "awslabs.terraform-mcp-server@latest"
+            ],
+            "env": {
+                "FASTMCP_LOG_LEVEL": "ERROR"
+            },
+            "disabled": false,
+            "autoApprove": []
+        }
     }
-  }
 }
