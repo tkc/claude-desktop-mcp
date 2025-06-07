@@ -126,12 +126,16 @@ class ShellExecutor {
   private baseDirectory: string;
   private maxTimeout: number;
   private shellEnvironment: Record<string, string>;
+  private allowAllCommands: boolean; // すべてのコマンドを許可するフラグ
 
   /**
    * コンストラクタ
    */
   constructor(baseDir: string, shellEnv: Record<string, string>) {
-    // 許可されたコマンドを設定（デフォルトは一般的に使用される開発ツール）
+    // すべてのコマンドを許可するフラグをtrueに設定
+    this.allowAllCommands = true;
+    
+    // 許可されたコマンドを設定（表示用）
     this.allowedCommands = new Set([
       // パッケージマネージャー
       'npm',
@@ -169,6 +173,23 @@ class ShellExecutor {
       'touch',
       'grep',
       'bun',
+      // Terraformコマンド
+      'terraform',
+      'tfenv',
+      // シェルコマンド
+      'sh',
+      'bash',
+      'zsh',
+      'cd',
+      'pwd',
+      // AWS関連
+      'aws',
+      // その他のユーティリティ
+      'curl',
+      'wget',
+      'jq',
+      'sed',
+      'awk'
     ]);
 
     // ベースディレクトリを設定
@@ -202,8 +223,8 @@ class ShellExecutor {
         return this.createErrorResponse('コマンドが指定されていません');
       }
 
-      // セキュリティチェック：コマンドが許可されているか確認
-      if (!this.isCommandAllowed(command)) {
+      // allowAllCommands = true の場合、コマンドチェックをスキップ
+      if (!this.allowAllCommands && !this.isCommandAllowed(command)) {
         return this.createErrorResponse(
           `コマンドは許可されていません: ${command}。許可されているコマンド: ${Array.from(this.allowedCommands).join(', ')}`
         );
@@ -257,7 +278,12 @@ class ShellExecutor {
    * コマンドが許可リストにあるかチェック
    */
   private isCommandAllowed(command: string): boolean {
-    // ベースコマンドを抽出（パスなし）
+    // allowAllCommands = true の場合、常にtrueを返す
+    if (this.allowAllCommands) {
+      return true;
+    }
+    
+    // それ以外の場合は許可リストをチェック
     const commandName = path.basename(command);
     return this.allowedCommands.has(commandName);
   }
@@ -371,6 +397,9 @@ class ShellExecutor {
    * 許可されたコマンドのリストを取得
    */
   public getAllowedCommands(): string[] {
+    if (this.allowAllCommands) {
+      return ["すべてのコマンドが許可されています"];
+    }
     return Array.from(this.allowedCommands);
   }
 
@@ -385,6 +414,10 @@ class ShellExecutor {
    * コマンドを許可リストから削除
    */
   public disallowCommand(command: string): void {
+    // allowAllCommands = true の場合は何もしない
+    if (this.allowAllCommands) {
+      return;
+    }
     this.allowedCommands.delete(command);
   }
 }
@@ -508,6 +541,7 @@ async function main() {
     await server.connect(transport);
     log('info', `Shell MCP Server started (Base directory: ${baseDirectory})`);
     log('info', "Using user's shell environment with PATH and other variables");
+    log('info', "All commands are allowed to execute");
   } catch (error) {
     log('error', `Server error: ${error}`);
     process.exit(1);
